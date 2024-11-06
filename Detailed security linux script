@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# ---------------------------
+# Ubuntu Security Hardening Script
+# Author: Your Name
+# Description: Comprehensive security hardening script for Ubuntu systems.
+# ---------------------------
+
+# Make sure only root can run our script
+if [ "$(id -u)" != "0" ]; then
+   echo "This script must be run as root." 1>&2
+   exit 1
+fi
+
+# Update System and Install Essential Packages
+echo "Updating and upgrading system packages..."
+sudo apt update -y && sudo apt upgrade -y
+sudo apt install -y ufw fail2ban auditd libpam-pwquality unattended-upgrades apt-listchanges
+
+# Enable Uncomplicated Firewall (UFW) and set default deny policies
+echo "Configuring UFW (Uncomplicated Firewall)..."
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw enable
+echo "UFW enabled with default deny incoming and allow outgoing policies."
+
+# SSH Hardening
+echo "Hardening SSH configuration..."
+sudo sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config              # Ensure Port is 22
+sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/#ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/#MaxAuthTries.*/MaxAuthTries 4/' /etc/ssh/sshd_config
+sudo sed -i 's/#LoginGraceTime.*/LoginGraceTime 60/' /etc/ssh/sshd_config
+sudo sed -i 's/#MaxSessions.*/MaxSessions 10/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+echo "SSH configuration hardened and service restarted."
+
+# Enforce Strong Password Policy
+echo "Configuring strong password policies..."
+sudo sed -i '/pam_pwquality.so/c\password requisite pam_pwquality.so retry=3 minlen=12 difok=4 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1' /etc/pam.d/common-password
+sudo sed -i '/pam_unix.so/c\password sufficient pam_unix.so remember=5 sha512' /etc/pam.d/common-password
+echo "Password policies updated: min length 12, complexity rules, and remember last 5 passwords."
+
+# Account Lockout Policy
+echo "Setting account lockout policy..."
+echo "auth required pam_tally2.so deny=5 unlock_time=900 onerr=fail" | sudo tee -a /etc/pam.d/common-auth
+echo "Account lockout policy set to lock account after 5 failed attempts, with a 15-minute unlock time."
+
+# Password Aging
+echo "Enforcing password aging policies..."
+sudo sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
+sudo sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   10/' /etc/login.defs
+sudo sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   7/' /etc/login.defs
+echo "Password aging policy updated: max days=90, min days=10, warn age=7."
+
+# Disable Unnecessary Network Services
+echo "Disabling unused network services..."
+sudo systemctl disable avahi-daemon.service
+sudo systemctl stop avahi-daemon.service
+sudo systemctl disable cups.service
+sudo systemctl stop cups.service
+sudo systemctl disable bluetooth.service
+sudo systemctl stop bluetooth.service
+echo "Unused network services disabled."
+
+# Install and Configure Fail2Ban
+echo "Installing and configuring Fail2Ban..."
+sudo systemctl enable fail2ban
+sudo systemctl start fail2ban
+sudo tee /etc/fail2ban/jail.local <<EOL
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+EOL
+sudo systemctl restart fail2ban
+echo "Fail2Ban configured with bantime=1 hour, findtime=10 minutes, maxretry=5."
+
+# Configure Automatic Security Updates
+echo "Enabling automatic security updates..."
+sudo dpkg-reconfigure -plow unattended-upgrades
+
+# Configure Auditd for Monitoring
+echo "Setting up audit daemon for monitoring..."
+sudo systemctl enable auditd
+sudo systemctl start auditd
+sudo tee -a /etc/audit/rules.d/audit.rules <<EOL
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/shadow -p wa -k shadow_changes
+-w /etc/group -p wa -k group_changes
+-w /etc/gshadow -p wa -k gshadow_changes
+-w /var/log/ -p wa -k logins
+EOL
+sudo systemctl restart auditd
+echo "Audit rules set to monitor critical files and logins."
+
+# Secure Shared Memory
+echo "Securing shared memory..."
+echo "tmpfs /run/shm tmpfs defaults,noexec,nosuid 0 0" | sudo tee -a /etc/fstab
+sudo mount -o remount /run/shm
+echo "Shared memory secured with noexec and nosuid options."
+
+# Remove Unnecessary Packages
+echo "Removing unnecessary packages..."
+sudo apt remove --purge -y telnet xinetd rpcbind nis rsh-server rsh-client talk talkd
+sudo apt autoremove -y
+echo "Unnecessary packages removed."
+
+# Configure Sysctl for Additional Kernel Security
+echo "Applying sysctl settings for additional security..."
+sudo tee -a /etc/sysctl.conf <<EOL
+# IP Spoofing protection
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Ignore ICMP broadcasts
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# Disable source packet routing
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+
+# Log suspicious packets
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# Disable IPv6 if not needed
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOL
+sudo sysctl -p
+echo "Sysctl settings applied."
+
+# Final Report
+echo "-----------------------------------------------------"
+echo "Security hardening completed successfully!"
+echo "Review changes and reboot the system for all changes to take effect."
+echo "-----------------------------------------------------"
+
+
