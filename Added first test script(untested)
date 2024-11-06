@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# Enable UFW firewall
+echo "Installing and enabling UFW..."
+sudo apt install ufw -y
+sudo ufw enable
+echo "UFW enabled."
+
+# Configure SSH settings
+echo "Updating SSH configuration..."
+sudo sed -i 's/#LogLevel.*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+sudo sed -i 's/#LoginGraceTime.*/LoginGraceTime 60/' /etc/ssh/sshd_config
+sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo sed -i 's/#MaxAuthTries.*/MaxAuthTries 4/' /etc/ssh/sshd_config
+sudo sed -i 's/#MaxSessions.*/MaxSessions 10/' /etc/ssh/sshd_config
+sudo sed -i 's/#HostbasedAuthentication.*/HostbasedAuthentication no/' /etc/ssh/sshd_config
+
+# Restart SSH service to apply changes
+echo "Restarting SSH service..."
+sudo systemctl restart sshd
+echo "SSH configuration updated."
+
+# Install PAM modules
+echo "Installing libpam-modules..."
+sudo apt-get install libpam-modules -y
+
+# Modify PAM password quality settings
+echo "Updating PAM password quality settings..."
+sudo sed -i '/pam_pwquality.so/c\password    requisite    pam_pwquality.so retry=3' /etc/pam.d/common-password
+sudo sed -i '/pam_unix.so/c\password    sufficient    pam_unix.so use_authtok sha512 shadow remember=12 minlen=10' /etc/pam.d/common-password
+
+# Configure password strength policies
+echo "Configuring password strength policies..."
+sudo bash -c 'cat <<EOT > /etc/security/pwquality.conf
+minlen = 10
+dcredit = -1
+ucredit = -1
+lcredit = -1
+ocredit = -1
+maxrepeat = 3
+gecoscheck = 1
+EOT'
+
+# Modify login definitions
+echo "Updating login.defs..."
+sudo sed -i 's/#PASS_MAX_DAYS.*/PASS_MAX_DAYS   30/' /etc/login.defs
+sudo sed -i 's/#PASS_MIN_DAYS.*/PASS_MIN_DAYS   10/' /etc/login.defs
+sudo sed -i 's/#PASS_WARN_AGE.*/PASS_WARN_AGE   7/' /etc/login.defs
+sudo sed -i 's/#LOGIN_RETRIES.*/LOGIN_RETRIES   5/' /etc/login.defs
+sudo sed -i 's/#LOGIN_TIMEOUT.*/LOGIN_TIMEOUT   60/' /etc/login.defs
+sudo sed -i 's/#DEFAULT_HOME.*/DEFAULT_HOME     no/' /etc/login.defs
+
+# Notify user about manual tasks
+echo "Script executed successfully. Please review the following:"
+echo "1. Review and manually edit the SSH configuration using: sudo nano /etc/ssh/sshd_config"
+echo "2. Review and manually edit the login settings using: sudo nano /etc/login.defs"
+echo "3. Manual password-related configurations have been applied; make sure everything is as expected."
