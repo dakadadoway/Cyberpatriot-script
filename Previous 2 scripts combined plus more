@@ -1,0 +1,183 @@
+#!/bin/bash
+
+# --------------------------------------------------------
+# Ultimate Ubuntu Security Hardening Script - Combined
+# Description: Comprehensive security hardening script
+# Suitable for Ubuntu-based systems
+# --------------------------------------------------------
+
+# Ensure script is run as root
+if [ "$(id -u)" != "0" ]; then
+   echo "This script must be run as root." 1>&2
+   exit 1
+fi
+
+# Update and Upgrade System
+echo "Updating and upgrading system packages..."
+apt update -y && apt upgrade -y && apt full-upgrade -y
+apt install -y ufw fail2ban auditd apparmor apparmor-profiles \
+    unattended-upgrades apt-listchanges logwatch aide \
+    chkrootkit rkhunter libpam-pwquality openssh-server
+
+# Enable and Configure UFW Firewall
+echo "Configuring UFW Firewall..."
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp   # Allow SSH
+ufw enable
+
+# Harden SSH Configuration
+echo "Hardening SSH configuration..."
+sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config                     # Set to default SSH port
+sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/#PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config
+sed -i 's/#ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/#MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+sed -i 's/#LoginGraceTime.*/LoginGraceTime 30/' /etc/ssh/sshd_config
+sed -i 's/#AllowTcpForwarding.*/AllowTcpForwarding no/' /etc/ssh/sshd_config
+sed -i 's/#X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
+echo "SSH configuration hardened. Restarting SSH service..."
+systemctl restart ssh
+
+# Enforce Strong Password Policies
+echo "Configuring strong password policies..."
+sed -i '/pam_pwquality.so/c\password requisite pam_pwquality.so retry=3 minlen=12 difok=4 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1' /etc/pam.d/common-password
+sed -i '/pam_unix.so/c\password sufficient pam_unix.so remember=5 sha512' /etc/pam.d/common-password
+
+# Configure Account Lockout Policy
+echo "Setting account lockout policy..."
+echo "auth required pam_tally2.so deny=5 unlock_time=900 onerr=fail audit" >> /etc/pam.d/common-auth
+
+# Set Password Aging Policies
+echo "Setting password aging policies..."
+sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
+sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   7/' /etc/login.defs
+sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/' /etc/login.defs
+
+# Enable Fail2Ban for SSH Protection
+echo "Configuring Fail2Ban to protect SSH..."
+cat <<EOL > /etc/fail2ban/jail.local
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 3
+
+[sshd]
+enabled = true
+EOL
+systemctl restart fail2ban
+
+# Enable and Configure Auditd
+echo "Configuring Auditd for system auditing..."
+systemctl enable auditd
+cat <<EOL > /etc/audit/rules.d/harden.rules
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/shadow -p wa -k shadow_changes
+-w /etc/group -p wa -k group_changes
+-w /etc/gshadow -p wa -k gshadow_changes
+-w /etc/ssh/sshd_config -p wa -k ssh_changes
+EOL
+systemctl restart auditd
+
+# Configure Automatic Security Updates
+echo "Enabling automatic security updates..."
+dpkg-reconfigure -plow unattended-upgrades
+
+# Harden Kernel Parameters (Sysctl)
+echo "Applying kernel-level security settings..."
+cat <<EOL >> /etc/sysctl.conf
+# IP Spoofing protection
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Ignore ICMP broadcasts
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# Ignore bogus ICMP errors
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# Disable source packet routing
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+
+# Log Martian Packets
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# Disable IP forwarding
+net.ipv4.ip_forward = 0
+
+# Disable IPv6 if not needed
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOL
+sysctl -p
+
+# Configure PAM Limits for Resource Management
+echo "Setting user resource limits in /etc/security/limits.conf..."
+cat <<EOL >> /etc/security/limits.conf
+* hard core 0
+* hard nproc 1000
+* hard nofile 4096
+* hard stack 10240
+EOL
+
+# Secure Shared Memory
+echo "Securing shared memory..."
+echo "tmpfs /run/shm tmpfs defaults,noexec,nosuid 0 0" >> /etc/fstab
+mount -o remount /run/shm
+
+# Install and Configure Rootkit Checkers
+echo "Installing and configuring rootkit checkers..."
+rkhunter --propupd
+chkrootkit
+
+# Install and Configure AIDE for Integrity Checking
+echo "Setting up AIDE for file integrity monitoring..."
+aideinit
+mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+echo "AIDE initialized. Run 'aide --check' periodically."
+
+# Remove Unnecessary Packages
+echo "Removing unnecessary packages for security..."
+apt remove -y xinetd telnet rsh-server rsh-client talk talkd vsftpd \
+    ftp tftpd tftp openbsd-inetd inetutils-telnet inetutils-ftp inetutils-ftpd
+apt autoremove -y
+
+# Enable AppArmor
+echo "Enabling AppArmor for mandatory access control..."
+systemctl enable apparmor
+systemctl start apparmor
+
+# Configure Logwatch for System Log Monitoring
+echo "Configuring Logwatch for daily log monitoring..."
+cat <<EOL > /etc/cron.daily/00logwatch
+#!/bin/sh
+/usr/sbin/logwatch --output mail --mailto root --detail high
+EOL
+chmod +x /etc/cron.daily/00logwatch
+
+# Set Banner Warnings
+echo "Configuring banner warnings for unauthorized access..."
+echo "Authorized access only. All activity may be monitored and reported." > /etc/issue
+echo "Authorized access only. All activity may be monitored and reported." > /etc/issue.net
+sed -i 's/#Banner.*/Banner \/etc\/issue.net/' /etc/ssh/sshd_config
+systemctl restart ssh
+
+# Configure Logs to be Stored in Separate Partitions
+echo "Moving logs to a secure partition..."
+mkdir /var/log/secure
+mount -o noexec,nosuid,nodev /var/log/secure
+chown syslog:adm /var/log/secure
+echo "/var/log/secure /var/log/secure ext4 defaults,nosuid,noexec,nodev 0 0" >> /etc/fstab
+
+# Enable Logging for Executed Commands (audit)
+echo "Enabling logging for executed commands..."
+echo "export PROMPT_COMMAND='logger -p local1.notice -t bash $USER : $(history 1 | sed \"s/^[ ]*[0-9]*[ ]*//\" )'" >> /etc/bash.bashrc
+
+# Final Report
+echo "-----------------------------------------------------"
+echo "Ultimate Ubuntu security hardening completed successfully!"
+echo "Please review changes and reboot the system to apply all configurations."
+echo "-----------------------------------------------------"
