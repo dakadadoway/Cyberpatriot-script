@@ -1,0 +1,181 @@
+#!/bin/bash
+
+echo "Starting full security hardening script with clipboard support and safe user management..."
+
+# 1. Ensure necessary clipboard tools are installed
+echo "Installing clipboard tools to maintain copy-paste functionality..."
+sudo apt install -y xclip xsel
+
+# 2. Update and upgrade packages
+echo "Updating and upgrading packages..."
+sudo apt update && sudo apt upgrade -y
+
+# 3. Configure APT sources for security updates
+echo "Configuring sources list for security updates..."
+sudo sed -i '/^# deb .*security.debian.org/ s/^# //' /etc/apt/sources.list
+sudo apt update
+
+# 4. Install and enable unattended upgrades for automatic security updates
+echo "Installing and enabling unattended upgrades..."
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades
+
+# 5. Set up UFW firewall and restrict inbound traffic
+echo "Installing and configuring UFW firewall..."
+sudo apt install -y ufw
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow ssh
+sudo ufw enable
+
+# 6. Configure SSH settings for secure access
+echo "Configuring SSH settings..."
+sudo sed -i -e 's/#PermitRootLogin.*/PermitRootLogin no/' \
+            -e 's/#PasswordAuthentication.*/PasswordAuthentication no/' \
+            -e 's/#PermitEmptyPasswords.*/PermitEmptyPasswords no/' \
+            -e 's/#AllowAgentForwarding.*/AllowAgentForwarding no/' \
+            -e 's/#MaxAuthTries.*/MaxAuthTries 4/' \
+            -e 's/#MaxSessions.*/MaxSessions 10/' \
+            -e 's/#ClientAliveInterval.*/ClientAliveInterval 300/' \
+            -e 's/#ClientAliveCountMax.*/ClientAliveCountMax 0/' \
+            -e 's/#X11Forwarding.*/X11Forwarding no/' \
+            -e 's/#PermitTunnel.*/PermitTunnel no/' \
+            -e 's/#UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+
+# 7. Enforce password policies
+echo "Setting password policies..."
+sudo apt install -y libpam-pwquality
+echo "password requisite pam_pwquality.so retry=3" | sudo tee -a /etc/pam.d/common-password
+echo "password sufficient pam_unix.so use_authtok sha512 shadow remember=12 minlen=10" | sudo tee -a /etc/pam.d/common-password
+echo -e "minlen=10\ndcredit=-1\nucredit=-1\nlcredit=-1\nocredit=-1\nmaxrepeat=3\ngecoscheck=1" | sudo tee /etc/security/pwquality.conf
+
+# 8. Set login definitions
+echo "Configuring login definitions..."
+sudo sed -i -e 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS 30/' \
+            -e 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS 10/' \
+            -e 's/^PASS_WARN_AGE.*/PASS_WARN_AGE 7/' \
+            -e 's/^LOGIN_RETRIES.*/LOGIN_RETRIES 5/' \
+            -e 's/^LOGIN_TIMEOUT.*/LOGIN_TIMEOUT 60/' \
+            -e 's/^DEFAULT_HOME.*/DEFAULT_HOME no/' /etc/login.defs
+
+# 9. Secure syslog configurations
+echo "Configuring syslog settings..."
+sudo sed -i -e 's/#LogLevel.*/LogLevel VERBOSE/' \
+            -e 's/#LoginGraceTime.*/LoginGraceTime 60/' \
+            -e 's/#PermitUserEnvironment.*/PermitUserEnvironment no/' \
+            -e 's/#PrintMotd.*/PrintMotd no/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+
+# 10. Disable USB storage devices (optional but recommended)
+echo "Disabling USB storage devices..."
+echo "install usb-storage /bin/false" | sudo tee /etc/modprobe.d/disable-usb-storage.conf
+sudo update-initramfs -u
+
+# 11. Restrict core dumps
+echo "Disabling core dumps..."
+echo "* hard core 0" | sudo tee -a /etc/security/limits.conf
+echo "fs.suid_dumpable=0" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+
+# 12. Enable ASLR (Address Space Layout Randomization) for additional security
+echo "Enabling ASLR..."
+echo "kernel.randomize_va_space=2" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+
+# 13. Harden network parameters
+echo "Configuring network security settings..."
+echo "net.ipv4.conf.all.rp_filter=1" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.conf.default.rp_filter=1" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.conf.all.accept_source_route=0" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.conf.default.accept_source_route=0" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.tcp_syncookies=1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+
+# 14. Secure file permissions
+echo "Securing file permissions..."
+chmod 600 /boot/grub/grub.cfg
+chmod 700 /root
+chmod -R go-rwx /etc/ssh
+chmod -R go-w /etc/crontab /etc/cron.*
+
+# 15. Disable unused services
+echo "Disabling unnecessary services..."
+for SERVICE in avahi-daemon cups bluetooth; do
+    sudo systemctl disable "$SERVICE"
+    sudo systemctl stop "$SERVICE"
+done
+
+# 16. User Management: Prompt for authorized users and automatically demote/remove unauthorized users
+echo "Please enter the list of authorized regular users (space-separated):"
+read -a AUTHORIZED_USERS
+
+echo "Please enter the list of authorized superusers (space-separated):"
+read -a AUTHORIZED_SUPERUSERS
+
+if [ -z "$AUTHORIZED_USERS" ] || [ -z "$AUTHORIZED_SUPERUSERS" ]; then
+    echo "Error: Authorized users and superusers lists cannot be empty."
+    exit 1
+fi
+
+is_user_in_list() {
+    local user="$1"
+    shift
+    local users_list=("$@")
+    for authorized_user in "${users_list[@]}"; do
+        if [[ "$user" == "$authorized_user" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+for user in $(getent passwd | awk -F: '{ print $1 }'); do
+    if is_user_in_list "$user" "${AUTHORIZED_USERS[@]}"; then
+        echo "Authorized regular user detected: $user"
+    elif is_user_in_list "$user" "${AUTHORIZED_SUPERUSERS[@]}"; then
+        echo "Authorized superuser detected: $user"
+    else
+        if sudo -lU "$user" | grep -q "(ALL)"; then
+            echo "Demoting unauthorized superuser to regular user: $user"
+            sudo deluser "$user" sudo
+        else
+            echo "Removing unauthorized user: $user"
+            sudo deluser "$user"
+        fi
+    fi
+done
+
+# 17. Remove unnecessary applications
+echo "Removing unnecessary applications..."
+sudo apt -y purge samba nmap postfix mailutils games* apache2
+
+# 18. Check for rootkits
+echo "Installing and running rkhunter for rootkit detection..."
+sudo apt install -y rkhunter
+sudo rkhunter --update
+sudo rkhunter --check --skip-keypress
+
+# 19. Configure audit logging for sensitive files
+echo "Configuring audit logging..."
+sudo apt install -y auditd
+echo "-w /etc/passwd -p wa -k passwd_changes" | sudo tee -a /etc/audit/audit.rules
+echo "-w /etc/group -p wa -k group_changes" | sudo tee -a /etc/audit/audit.rules
+echo "-w /etc/shadow -p wa -k shadow_changes" | sudo tee -a /etc/audit/audit.rules
+echo "-w /var/log/auth.log -p wa -k auth_logs" | sudo tee -a /etc/audit/audit.rules
+sudo systemctl restart auditd
+
+# 20. Final update and upgrade
+echo "Finalizing updates..."
+sudo apt update && sudo apt upgrade -y
+
+echo "Security hardening script completed successfully with clipboard functionality and safe user management."
+
+
+====================================================================================================================================================
+-------------------------------------------------------------ACTIVATE:------------------------------------------------------------------------------
+====================================================================================================================================================
+create a file EX:CyberScript.sh
+make it executable: chmod +x CyberScript.sh (or whatever its name is)
+executing it: sudo ./CyberScript.sh
+***************************************************Unchecked and added only with old notes**************************************
